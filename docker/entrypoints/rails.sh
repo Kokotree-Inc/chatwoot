@@ -30,5 +30,49 @@ do
   sleep 2;
 done
 
+# Run database migrations if needed
+echo "🔄 Running database migrations..."
+bundle exec rails db:migrate
+
+# Auto-configure Kokotree branding
+echo "🎨 Setting up Kokotree branding..."
+bundle exec rails runner "
+begin
+  # Update INSTALLATION_NAME
+  config = InstallationConfig.find_or_create_by(name: 'INSTALLATION_NAME')
+  unless config.value == 'Kokotree Chat'
+    config.update!(value: 'Kokotree Chat')
+    puts '✅ Updated INSTALLATION_NAME to: Kokotree Chat'
+  end
+
+  # Update BRAND_NAME
+  config = InstallationConfig.find_or_create_by(name: 'BRAND_NAME')
+  unless config.value == 'Kokotree Chat'
+    config.update!(value: 'Kokotree Chat')
+    puts '✅ Updated BRAND_NAME to: Kokotree Chat'
+  end
+
+  # Update BRAND_URL if you have a website
+  config = InstallationConfig.find_or_create_by(name: 'BRAND_URL')
+  unless config.value == 'https://kokotree.com'
+    config.update!(value: 'https://kokotree.com')
+    puts '✅ Updated BRAND_URL to: https://kokotree.com'
+  end
+
+  # Update WIDGET_BRAND_URL
+  config = InstallationConfig.find_or_create_by(name: 'WIDGET_BRAND_URL')
+  unless config.value == 'https://kokotree.com'
+    config.update!(value: 'https://kokotree.com')
+    puts '✅ Updated WIDGET_BRAND_URL to: https://kokotree.com'
+  end
+
+  # Clear the cache
+  GlobalConfig.clear_cache
+  puts '🎉 Kokotree branding configured successfully!'
+rescue => e
+  puts 'ℹ️  Branding setup will run after database is fully initialized'
+end
+"
+
 # Execute the main process of the container
 exec "$@"
