@@ -95,3 +95,8 @@ yarn-debug.log*
 .claude/settings.local.json
 .cursor
 /.pnpm-store
+CLAUDE.local.md
+
+# Histoire deployment
+.netlify
+.histoire
