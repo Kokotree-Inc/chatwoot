@@ -56,6 +56,19 @@
 # All other variables in .env are synced as-is (passwords, keys, etc.)
 #
 # ============================================================================
+# BUILD PLATFORM CONFIGURATION
+# ============================================================================
+#
+# BUILD_PLATFORM (optional, defaults to linux/amd64):
+#    - Set to target platform for Docker image build
+#    - Default: linux/amd64 (for most production servers)
+#    - Options: linux/amd64, linux/arm64, linux/arm/v7, etc.
+#    - Example: BUILD_PLATFORM=linux/amd64
+#
+# If building on Mac (ARM) for Linux (AMD64) server, set:
+#    BUILD_PLATFORM=linux/amd64
+#
+# ============================================================================
 
 # Exit on any error
 set -e
@@ -63,13 +76,14 @@ set -e
 # Load configuration from .env file if it exists
 # These are deployment-specific variables (not Chatwoot app variables)
 if [ -f ".env" ]; then
-    export $(grep -v '^#' .env | grep -E '^DOCKER_USERNAME=|^REMOTE_HOST=|^DOCKER_REGISTRY=|^IMAGE_NAME=|^IMAGE_TAG=|^SKIP_ENV_SYNC=|^DEPLOY_DIR=|^PRODUCTION_FRONTEND_URL=' | xargs)
+    export $(grep -v '^#' .env | grep -E '^DOCKER_USERNAME=|^REMOTE_HOST=|^DOCKER_REGISTRY=|^IMAGE_NAME=|^IMAGE_TAG=|^SKIP_ENV_SYNC=|^DEPLOY_DIR=|^PRODUCTION_FRONTEND_URL=|^BUILD_PLATFORM=' | xargs)
 fi
 
 # Configuration (must be set via .env file or environment variables)
 DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"  # docker.io, ghcr.io, or your registry
 IMAGE_NAME="${IMAGE_NAME:-chatwoot}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"                  # Use git SHA, version, or 'latest'
+BUILD_PLATFORM="${BUILD_PLATFORM:-linux/amd64}"  # Platform to build for (linux/amd64, linux/arm64, etc.)
 
 # Required configuration - must be set
 if [ -z "$DOCKER_USERNAME" ]; then
@@ -220,8 +234,9 @@ build_image_locally() {
         log_warn "No .git directory found, using 'unknown' for git SHA"
     fi
     
-    # Build the image
-    docker build -t "$FULL_IMAGE_NAME" -f docker/Dockerfile .
+    # Build the image for the target platform (default: linux/amd64 for production servers)
+    log_info "Building for platform: $BUILD_PLATFORM"
+    docker build --platform "$BUILD_PLATFORM" -t "$FULL_IMAGE_NAME" -f docker/Dockerfile .
     
     # Cleanup .git_sha
     rm -f .git_sha

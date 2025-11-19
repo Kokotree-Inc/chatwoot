@@ -409,6 +409,124 @@ netstat -tlnp | grep -E ':3080|:5432|:6379'
 - Port 5432: PostgreSQL (internal)
 - Port 6379: Redis (internal)
 
+### PostgreSQL Restarting / Not Starting
+
+**Cause:** Missing `POSTGRES_PASSWORD` in `.env` or compose file not reading `.env`
+
+**Symptoms:**
+- PostgreSQL container keeps restarting
+- Logs show: "Database is uninitialized and superuser password is not specified"
+
+**Fix:**
+```bash
+# 1. Check if password exists in .env
+ssh kokotree-prod-server 'grep POSTGRES_PASSWORD /var/www/apaya/chatwoot/.env'
+
+# 2. Verify docker-compose.production.yaml has env_file: .env for postgres service
+# (Should have: env_file: .env in postgres section)
+
+# 3. Restart PostgreSQL
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml restart postgres'
+
+# 4. Check logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml logs postgres | tail -20'
+```
+
+### Migration Failed / PostgreSQL Not Ready
+
+**Cause:** Migration ran before PostgreSQL was ready, or PostgreSQL was restarting
+
+**Symptoms:**
+- Migration container exits with error
+- Logs show: "postgres:5432 - no response"
+- Rails/Sidekiq services not starting
+
+**Fix:**
+```bash
+# 1. Verify PostgreSQL is running and healthy
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml ps postgres'
+
+# 2. Check PostgreSQL logs for "ready to accept connections"
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml logs postgres | grep "ready to accept"'
+
+# 3. Remove old migration container if exists
+ssh kokotree-prod-server 'docker ps -a | grep rails-run | awk "{print \$1}" | xargs docker rm -f'
+
+# 4. Run migration manually (PostgreSQL must be ready)
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml run --rm \
+  -e RAILS_ENV=production \
+  rails \
+  bundle exec rails db:chatwoot_prepare'
+
+# 5. Start Rails and Sidekiq after migration completes
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml up -d rails sidekiq'
+```
+
+### Rails/Sidekiq Not Starting
+
+**Cause:** Migration not completed, or services not started after deployment
+
+**Symptoms:**
+- `docker compose ps` shows only postgres and redis
+- Port 3080 not accessible
+- No rails/sidekiq containers
+
+**Fix:**
+```bash
+# 1. Check if migration completed
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml run --rm \
+  -e RAILS_ENV=production \
+  rails \
+  bundle exec rails db:migrate:status'
+
+# 2. If migration needed, run it (see "Migration Failed" section above)
+
+# 3. Start Rails and Sidekiq
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml up -d rails sidekiq'
+
+# 4. Verify services are running
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml ps'
+
+# 5. Check Rails logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml logs rails | tail -30'
+
+# 6. Test Rails is responding
+ssh kokotree-prod-server 'curl -I http://localhost:3080'
+```
+
+### Architecture Mismatch Error
+
+**Cause:** Image built for wrong architecture (e.g., ARM64 on Mac, but server is AMD64)
+
+**Symptoms:**
+- Error: "exec format error" or "platform does not match"
+- Container exits immediately
+
+**Fix:**
+```bash
+# 1. Check image architecture
+docker inspect raghavkokotree/chatwoot:latest | grep Architecture
+
+# 2. Check server architecture
+ssh kokotree-prod-server 'uname -m'
+
+# 3. Rebuild with correct platform (add to .env or deploy.sh)
+# BUILD_PLATFORM=linux/amd64
+
+# 4. Rebuild and redeploy
+./deploy.sh
+```
+
 ---
 
 ## 🔧 Common Commands
@@ -441,6 +559,65 @@ ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker
 
 # Stop services
 ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml down'
+
+# Start specific services
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml up -d postgres redis'
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml up -d rails sidekiq'
+```
+
+### Database Management
+
+```bash
+# Run migration manually
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml run --rm \
+  -e RAILS_ENV=production \
+  rails \
+  bundle exec rails db:chatwoot_prepare'
+
+# Check migration status
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml run --rm \
+  -e RAILS_ENV=production \
+  rails \
+  bundle exec rails db:migrate:status'
+
+# Rails console
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec rails \
+  bundle exec rails console'
+
+# PostgreSQL console
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec postgres \
+  psql -U postgres -d chatwoot'
+```
+
+### Service Health Checks
+
+```bash
+# Check all services status
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml ps'
+
+# Check PostgreSQL logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs postgres | tail -20'
+
+# Check Redis logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs redis | tail -20'
+
+# Check Rails logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs rails | tail -30'
+
+# Check Sidekiq logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs sidekiq | tail -30'
+
+# Test Rails HTTP endpoint
+ssh kokotree-prod-server 'curl -I http://localhost:3080'
+
+# Test PostgreSQL connection
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec postgres \
+  pg_isready -U postgres'
 ```
 
 ### Nginx Management
