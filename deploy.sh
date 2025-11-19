@@ -288,13 +288,29 @@ push_image_to_registry() {
 sync_compose_file() {
     log_subheader "📁 SYNCING DOCKER COMPOSE FILE"
     
+    log_progress "Preparing docker-compose.production.yaml with correct image name..."
+    
+    # Create temporary compose file with correct image name
+    TEMP_COMPOSE=$(mktemp)
+    cp "$COMPOSE_FILE" "$TEMP_COMPOSE"
+    
+    # Update image name in temporary file
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        sed -i '' "s|image:.*chatwoot.*|image: $FULL_IMAGE_NAME|g" "$TEMP_COMPOSE"
+    else
+        sed -i "s|image:.*chatwoot.*|image: $FULL_IMAGE_NAME|g" "$TEMP_COMPOSE"
+    fi
+    
+    log_info "Updated image to: $FULL_IMAGE_NAME"
+    
     log_progress "Syncing docker-compose.production.yaml to server..."
     
     # Create deployment directory on server
     ssh $REMOTE_HOST "mkdir -p $DEPLOY_DIR"
     
-    # Sync compose file
-    scp "$COMPOSE_FILE" ${REMOTE_HOST}:${DEPLOY_DIR}/${COMPOSE_FILE}
+    # Sync compose file with correct image name
+    scp "$TEMP_COMPOSE" ${REMOTE_HOST}:${DEPLOY_DIR}/${COMPOSE_FILE}
+    rm -f "$TEMP_COMPOSE"
     
     # Sync .env file to server (default behavior, can be disabled with SKIP_ENV_SYNC=yes)
     if [ "${SKIP_ENV_SYNC:-no}" = "yes" ]; then
@@ -365,18 +381,23 @@ sync_compose_file() {
     log_success "Docker compose file synced"
 }
 
-# Update docker-compose to use the new image
+# Update docker-compose to use the new image (now done in sync_compose_file, but kept for compatibility)
 update_compose_image() {
-    log_subheader "🔄 UPDATING DOCKER COMPOSE IMAGE"
+    log_subheader "🔄 VERIFYING DOCKER COMPOSE IMAGE"
     
-    log_progress "Updating image reference in docker-compose file on server..."
+    log_progress "Verifying image reference in docker-compose file on server..."
     
-    # Update image name in docker-compose file on server
-    ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
-        sed -i 's|image:.*chatwoot.*|image: $FULL_IMAGE_NAME|g' $COMPOSE_FILE && \
-        echo '✅ Updated image to: $FULL_IMAGE_NAME'"
+    # Verify image name is correct
+    SERVER_IMAGE=$(ssh $REMOTE_HOST "cd $DEPLOY_DIR && grep 'image:.*chatwoot' $COMPOSE_FILE | head -1" | sed 's/.*image: *//' | tr -d ' ')
     
-    log_success "Docker compose file updated with new image"
+    if [ "$SERVER_IMAGE" = "$FULL_IMAGE_NAME" ]; then
+        log_success "Docker compose file has correct image: $FULL_IMAGE_NAME"
+    else
+        log_warn "Image mismatch detected. Updating..."
+        ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
+            sed -i 's|image:.*chatwoot.*|image: $FULL_IMAGE_NAME|g' $COMPOSE_FILE"
+        log_success "Docker compose file updated with new image"
+    fi
 }
 
 # Pull image on server

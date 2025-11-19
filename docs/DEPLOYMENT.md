@@ -44,6 +44,23 @@ docker compose -f docker-compose.production.yaml restart rails sidekiq
 
 ## 📦 Deployment Scripts
 
+### Important: Custom docker-compose.production.yaml
+
+**Your `docker-compose.production.yaml` is customized** with:
+- Your Docker image: `raghavkokotree/chatwoot:latest`
+- Custom port: `3080` (instead of default `3000`)
+- PostgreSQL password from `.env` file
+
+**When pulling from Chatwoot upstream:**
+1. Check if `docker-compose.production.yaml` changed upstream
+2. Merge changes manually, keeping your customizations:
+   - Image name: `raghavkokotree/chatwoot:latest`
+   - Port: `3080`
+   - PostgreSQL `env_file: .env`
+3. The deploy script automatically updates the image name, but keeping it correct in the file is cleaner
+
+**Note:** The deploy script (`deploy.sh`) automatically updates the image name when syncing, so even if you pull upstream changes, it will be corrected during deployment.
+
 ### Script 1: `deploy.sh` (Registry-Based - Recommended)
 
 **What it does:**
