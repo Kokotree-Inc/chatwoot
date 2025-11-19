@@ -1,13 +1,17 @@
 #!/bin/bash
 
 # ============================================================================
-# CHATWOOT SERVER-SIDE DEPLOYMENT SCRIPT
+# CHATWOOT REGISTRY-BASED DEPLOYMENT SCRIPT
 # ============================================================================
 #
-# This script deploys Chatwoot to a production server by:
-# 1. Syncing code to server
-# 2. Building Docker image (includes SDK build automatically)
-# 3. Starting services and running migrations
+# Industry-standard deployment approach:
+# 1. Build Docker image locally
+# 2. Push image to Docker registry (Docker Hub, GitHub Container Registry, etc.)
+# 3. Pull image on server
+# 4. Deploy containers
+#
+# This is faster than building on server (2-5 min vs 15-30 min)
+# and follows industry best practices.
 #
 # ============================================================================
 # HOW SDK BUILD WORKS AUTOMATICALLY
@@ -17,7 +21,7 @@
 # You do NOT need to manually run it!
 #
 # Build Flow:
-#   deploy-server-build.sh → build_image_on_server() function
+#   deploy.sh → build_image_locally()
 #       ↓
 #   docker build (executes Dockerfile)
 #       ↓
@@ -31,19 +35,64 @@
 # See: lib/tasks/build.rake for the hook implementation.
 #
 # ============================================================================
+# .ENV FILE VARIABLES THAT GET CHANGED FOR PRODUCTION
+# ============================================================================
+#
+# Before syncing .env to server, these variables are automatically updated:
+#
+# 1. FRONTEND_URL
+#    - If contains localhost/0.0.0.0 → Changed to: https://chat.apaya.com
+#    - Or use PRODUCTION_FRONTEND_URL if set in .env
+#    - Example: http://0.0.0.0:3100 → https://chat.apaya.com
+#
+# 2. RAILS_ENV
+#    - Always set to: production
+#    - Example: development → production
+#
+# 3. NODE_ENV
+#    - Always set to: production
+#    - Example: development → production
+#
+# All other variables in .env are synced as-is (passwords, keys, etc.)
+#
+# ============================================================================
 
 # Exit on any error
 set -e
 
-# Configuration
-CHATWOOT_IMAGE="chatwoot/chatwoot"
-TAG="latest"
-REMOTE_HOST="kokotree-prod-server"  # SSH hostname from ~/.ssh/config
-DEPLOY_DIR="/var/www/apaya/chatwoot"  # Deployment directory on server
+# Load configuration from .env file if it exists
+# These are deployment-specific variables (not Chatwoot app variables)
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | grep -E '^DOCKER_USERNAME=|^REMOTE_HOST=|^DOCKER_REGISTRY=|^IMAGE_NAME=|^IMAGE_TAG=|^SKIP_ENV_SYNC=|^DEPLOY_DIR=|^PRODUCTION_FRONTEND_URL=' | xargs)
+fi
+
+# Configuration (must be set via .env file or environment variables)
+DOCKER_REGISTRY="${DOCKER_REGISTRY:-docker.io}"  # docker.io, ghcr.io, or your registry
+IMAGE_NAME="${IMAGE_NAME:-chatwoot}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"                  # Use git SHA, version, or 'latest'
+
+# Required configuration - must be set
+if [ -z "$DOCKER_USERNAME" ]; then
+    echo "❌ ERROR: DOCKER_USERNAME is not set!"
+    echo "   Please set it in .env file or environment variable:"
+    echo "   DOCKER_USERNAME=your-dockerhub-username"
+    exit 1
+fi
+
+if [ -z "$REMOTE_HOST" ]; then
+    echo "❌ ERROR: REMOTE_HOST is not set!"
+    echo "   Please set it in .env file or environment variable:"
+    echo "   REMOTE_HOST=your-ssh-hostname"
+    exit 1
+fi
+
+FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+DEPLOY_DIR="${DEPLOY_DIR:-/var/www/apaya/chatwoot}"  # Deployment directory on server (can be set in .env)
 COMPOSE_FILE="docker-compose.production.yaml"
+
 TIMESTAMP=$(date +%s)
 LOG_DIR="./deploy"
-LOG_FILE="$LOG_DIR/deploy_server_build_$TIMESTAMP.log"
+LOG_FILE="$LOG_DIR/deploy_registry_${TIMESTAMP}.log"
 
 # Colors for output
 RED='\033[0;31m'
@@ -103,12 +152,17 @@ mkdir -p "$LOG_DIR"
 exec 1> >(tee -a "$LOG_FILE")
 exec 2>&1
 
-log_header "🚀 CHATWOOT SERVER-SIDE DEPLOYMENT"
+log_header "🚀 CHATWOOT REGISTRY-BASED DEPLOYMENT"
 echo -e "${GRAY}Started at: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 echo -e "${GRAY}Host: $REMOTE_HOST${NC}"
 echo -e "${GRAY}Deploy directory: $DEPLOY_DIR${NC}"
 echo -e "${GRAY}Log file: $LOG_FILE${NC}"
-echo -e "${GRAY}Strategy: Build Docker image directly on server${NC}"
+echo -e "${GRAY}Image: $FULL_IMAGE_NAME${NC}"
+echo -e "${GRAY}Registry: $DOCKER_REGISTRY${NC}"
+echo -e "${GRAY}Strategy: Build locally → Push to registry → Pull on server${NC}"
+if [ "${SKIP_ENV_SYNC:-no}" = "yes" ]; then
+    echo -e "${YELLOW}⚠️  SKIP_ENV_SYNC=yes - .env file will NOT be synced${NC}"
+fi
 echo ""
 
 # Check if required files exist
@@ -127,112 +181,204 @@ check_required_files() {
         exit 1
     fi
     
-    # Check if .env file exists (warn if not)
-    if [ ! -f ".env" ]; then
-        log_warn ".env file not found - ensure environment variables are set on server"
-    fi
-    
-    # Check if .dockerignore exists
-    if [ ! -f ".dockerignore" ]; then
-        log_warn ".dockerignore not found - this may increase build time"
+    # Check if Docker is running
+    if ! docker info > /dev/null 2>&1; then
+        log_error "Docker is not running. Please start Docker and try again."
+        exit 1
     fi
     
     log_success "All required files found"
 }
 
-# Sync code to server
-sync_code_to_server() {
-    log_subheader "📁 SYNCING CODE TO SERVER"
+# Generate image tag from git (optional)
+generate_image_tag() {
+    if [ "$IMAGE_TAG" = "latest" ] && [ -d ".git" ]; then
+        GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "latest")
+        if [ "$GIT_SHA" != "latest" ]; then
+            IMAGE_TAG="$GIT_SHA"
+            FULL_IMAGE_NAME="${DOCKER_USERNAME}/${IMAGE_NAME}:${IMAGE_TAG}"
+            log_info "Using git SHA as image tag: $IMAGE_TAG"
+        fi
+    fi
+}
+
+# Build Docker image locally
+build_image_locally() {
+    log_subheader "🔨 BUILDING DOCKER IMAGE LOCALLY"
     
-    log_progress "Preparing deployment archive..."
-    SYNC_START=$(date +%s)
+    log_progress "Building Docker image (this includes asset precompilation and SDK build)..."
+    log_info "This may take 15-30 minutes for first build, 5-10 minutes for subsequent builds..."
+    BUILD_START=$(date +%s)
     
-    # Create temporary directory for deployment
-    TEMP_DIR=$(mktemp -d)
-    DEPLOY_ARCHIVE="${TEMP_DIR}/chatwoot-deploy-${TIMESTAMP}.tar.gz"
-    
-    # Generate .git_sha file locally (in temp location, not in repo)
-    log_progress "Generating .git_sha file from local git repository..."
+    # Generate .git_sha file locally (for Dockerfile)
     if [ -d ".git" ]; then
         GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
-        echo "$GIT_SHA" > "${TEMP_DIR}/.git_sha"
+        echo "$GIT_SHA" > .git_sha
         log_info "Git SHA: $(echo $GIT_SHA | cut -c1-7)"
     else
-        echo "unknown" > "${TEMP_DIR}/.git_sha"
+        echo "unknown" > .git_sha
         log_warn "No .git directory found, using 'unknown' for git SHA"
     fi
     
-    # Create tar.gz archive with all necessary files
-    log_progress "Creating deployment archive (this may take a minute)..."
-    # First, copy .git_sha to current directory temporarily
-    cp "${TEMP_DIR}/.git_sha" .git_sha
+    # Build the image
+    docker build -t "$FULL_IMAGE_NAME" -f docker/Dockerfile .
     
-    tar -czf "$DEPLOY_ARCHIVE" \
-        --exclude='node_modules' \
-        --exclude='.git' \
-        --exclude='tmp' \
-        --exclude='log' \
-        --exclude='storage' \
-        --exclude='public/packs' \
-        --exclude='public/vite' \
-        --exclude='coverage' \
-        --exclude='.env*' \
-        --exclude='deploy' \
-        --exclude='spec' \
-        --exclude='*.log' \
-        --exclude='.overmind.sock' \
-        --exclude='tmp/pids' \
-        .
-    
-    # Remove temporary .git_sha from repo directory
+    # Cleanup .git_sha
     rm -f .git_sha
-    
-    ARCHIVE_SIZE=$(du -h "$DEPLOY_ARCHIVE" | cut -f1)
-    log_info "Archive created: ${ARCHIVE_SIZE}"
-    
-    # Create deployment directory on server
-    ssh $REMOTE_HOST "mkdir -p $DEPLOY_DIR"
-    
-    # Transfer archive to server
-    log_progress "Transferring archive to server..."
-    scp "$DEPLOY_ARCHIVE" ${REMOTE_HOST}:/tmp/chatwoot-deploy.tar.gz
-    
-    # Extract archive on server
-    log_progress "Extracting archive on server..."
-    ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
-        tar -xzf /tmp/chatwoot-deploy.tar.gz && \
-        rm /tmp/chatwoot-deploy.tar.gz && \
-        chmod -R u+w . && \
-        find docker/entrypoints -type f -name '*.sh' -exec chmod +x {} \; && \
-        find docker/entrypoints -type f -exec chmod +x {} \;"
-    
-    # Cleanup local temp files
-    rm -rf "$TEMP_DIR"
-    
-    SYNC_END=$(date +%s)
-    SYNC_DURATION=$((SYNC_END - SYNC_START))
-    log_success "Code synced to server in ${SYNC_DURATION}s"
-}
-
-# Build Docker image on server
-build_image_on_server() {
-    log_subheader "🔨 BUILDING DOCKER IMAGE ON SERVER"
-    
-    log_progress "Building Docker image on server (this includes asset precompilation and SDK build)..."
-    log_info "This may take several minutes as it builds assets, SDK, and compiles Ruby gems..."
-    BUILD_START=$(date +%s)
-    
-    # Build the image directly on the server
-    # The Dockerfile automatically runs assets:precompile which includes SDK build
-    ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
-        docker build -t ${CHATWOOT_IMAGE}:${TAG} -f docker/Dockerfile . && \
-        docker images ${CHATWOOT_IMAGE}:${TAG} --format '{{.Size}}'"
     
     BUILD_END=$(date +%s)
     BUILD_DURATION=$((BUILD_END - BUILD_START))
     MINUTES=$((BUILD_DURATION / 60))
     SECONDS=$((BUILD_DURATION % 60))
-    log_success "Docker image built on server in ${MINUTES}m ${SECONDS}s"
+    
+    # Get image size
+    IMAGE_SIZE=$(docker images "$FULL_IMAGE_NAME" --format '{{.Size}}')
+    
+    log_success "Docker image built locally in ${MINUTES}m ${SECONDS}s"
+    log_info "Image size: $IMAGE_SIZE"
+}
+
+# Push image to registry
+push_image_to_registry() {
+    log_subheader "📤 PUSHING IMAGE TO REGISTRY"
+    
+    log_progress "Pushing image to $DOCKER_REGISTRY/$FULL_IMAGE_NAME..."
+    log_info "You may need to login: docker login $DOCKER_REGISTRY"
+    
+    PUSH_START=$(date +%s)
+    
+    # Check if logged in
+    if ! docker info | grep -q "Username"; then
+        log_warn "Not logged into Docker registry. Attempting login..."
+        if [ "$DOCKER_REGISTRY" = "docker.io" ]; then
+            log_info "Please login to Docker Hub:"
+            docker login
+        else
+            log_info "Please login to $DOCKER_REGISTRY:"
+            docker login "$DOCKER_REGISTRY"
+        fi
+    fi
+    
+    # Push image
+    docker push "$FULL_IMAGE_NAME"
+    
+    PUSH_END=$(date +%s)
+    PUSH_DURATION=$((PUSH_END - PUSH_START))
+    
+    log_success "Image pushed to registry in ${PUSH_DURATION}s"
+    log_info "Image available at: $DOCKER_REGISTRY/$FULL_IMAGE_NAME"
+}
+
+# Sync docker-compose file to server
+sync_compose_file() {
+    log_subheader "📁 SYNCING DOCKER COMPOSE FILE"
+    
+    log_progress "Syncing docker-compose.production.yaml to server..."
+    
+    # Create deployment directory on server
+    ssh $REMOTE_HOST "mkdir -p $DEPLOY_DIR"
+    
+    # Sync compose file
+    scp "$COMPOSE_FILE" ${REMOTE_HOST}:${DEPLOY_DIR}/${COMPOSE_FILE}
+    
+    # Sync .env file to server (default behavior, can be disabled with SKIP_ENV_SYNC=yes)
+    if [ "${SKIP_ENV_SYNC:-no}" = "yes" ]; then
+        log_info "Skipping .env sync (SKIP_ENV_SYNC=yes)"
+        if ! ssh $REMOTE_HOST "test -f ${DEPLOY_DIR}/.env"; then
+            log_warn ".env file not found on server!"
+            log_info "You need to create .env file manually on the server."
+        fi
+    else
+        if [ -f ".env" ]; then
+            log_progress "Preparing .env file for production..."
+            
+            # Create temporary production .env file
+            TEMP_ENV=$(mktemp)
+            cp .env "$TEMP_ENV"
+            
+            # Replace production-specific values
+            # FRONTEND_URL - use PRODUCTION_FRONTEND_URL if set, otherwise auto-detect and replace
+            if [ -n "$PRODUCTION_FRONTEND_URL" ]; then
+                # Use provided production URL
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "s|^FRONTEND_URL=.*|FRONTEND_URL=$PRODUCTION_FRONTEND_URL|" "$TEMP_ENV"
+                else
+                    sed -i "s|^FRONTEND_URL=.*|FRONTEND_URL=$PRODUCTION_FRONTEND_URL|" "$TEMP_ENV"
+                fi
+                log_info "Updated FRONTEND_URL to: $PRODUCTION_FRONTEND_URL"
+            else
+                # Auto-detect: if FRONTEND_URL contains localhost/0.0.0.0, replace with production URL
+                EXISTING_URL=$(grep "^FRONTEND_URL=" "$TEMP_ENV" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || echo "")
+                if [ -z "$EXISTING_URL" ] || [[ "$EXISTING_URL" == *"0.0.0.0"* ]] || [[ "$EXISTING_URL" == *"localhost"* ]] || [[ "$EXISTING_URL" == *"127.0.0.1"* ]]; then
+                    PROD_URL="https://chat.apaya.com"
+                    if [[ "$OSTYPE" == "darwin"* ]]; then
+                        sed -i '' "s|^FRONTEND_URL=.*|FRONTEND_URL=$PROD_URL|" "$TEMP_ENV" 2>/dev/null || echo "FRONTEND_URL=$PROD_URL" >> "$TEMP_ENV"
+                    else
+                        sed -i "s|^FRONTEND_URL=.*|FRONTEND_URL=$PROD_URL|" "$TEMP_ENV" 2>/dev/null || echo "FRONTEND_URL=$PROD_URL" >> "$TEMP_ENV"
+                    fi
+                    log_info "Updated FRONTEND_URL from '$EXISTING_URL' to: $PROD_URL"
+                else
+                    log_info "Keeping existing FRONTEND_URL: $EXISTING_URL"
+                fi
+            fi
+            
+            # Ensure RAILS_ENV and NODE_ENV are set to production
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                sed -i '' "s|^RAILS_ENV=.*|RAILS_ENV=production|" "$TEMP_ENV" 2>/dev/null || echo "RAILS_ENV=production" >> "$TEMP_ENV"
+                sed -i '' "s|^NODE_ENV=.*|NODE_ENV=production|" "$TEMP_ENV" 2>/dev/null || echo "NODE_ENV=production" >> "$TEMP_ENV"
+            else
+                sed -i "s|^RAILS_ENV=.*|RAILS_ENV=production|" "$TEMP_ENV" 2>/dev/null || echo "RAILS_ENV=production" >> "$TEMP_ENV"
+                sed -i "s|^NODE_ENV=.*|NODE_ENV=production|" "$TEMP_ENV" 2>/dev/null || echo "NODE_ENV=production" >> "$TEMP_ENV"
+            fi
+            
+            log_progress "Syncing production .env file to server..."
+            scp "$TEMP_ENV" ${REMOTE_HOST}:${DEPLOY_DIR}/.env
+            rm -f "$TEMP_ENV"
+            
+            # Set secure permissions
+            ssh $REMOTE_HOST "chmod 600 ${DEPLOY_DIR}/.env"
+            log_success ".env file synced to server (with production values and secure permissions)"
+        else
+            log_warn ".env file not found locally - skipping sync"
+            if ! ssh $REMOTE_HOST "test -f ${DEPLOY_DIR}/.env"; then
+                log_warn ".env file not found on server either!"
+                log_info "You need to create .env file manually on the server."
+            fi
+        fi
+    fi
+    
+    log_success "Docker compose file synced"
+}
+
+# Update docker-compose to use the new image
+update_compose_image() {
+    log_subheader "🔄 UPDATING DOCKER COMPOSE IMAGE"
+    
+    log_progress "Updating image reference in docker-compose file on server..."
+    
+    # Update image name in docker-compose file on server
+    ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
+        sed -i 's|image:.*chatwoot.*|image: $FULL_IMAGE_NAME|g' $COMPOSE_FILE && \
+        echo '✅ Updated image to: $FULL_IMAGE_NAME'"
+    
+    log_success "Docker compose file updated with new image"
+}
+
+# Pull image on server
+pull_image_on_server() {
+    log_subheader "📥 PULLING IMAGE ON SERVER"
+    
+    log_progress "Pulling image $FULL_IMAGE_NAME on server..."
+    
+    PULL_START=$(date +%s)
+    
+    # Pull image on server
+    ssh $REMOTE_HOST "docker pull $FULL_IMAGE_NAME"
+    
+    PULL_END=$(date +%s)
+    PULL_DURATION=$((PULL_END - PULL_START))
+    
+    log_success "Image pulled on server in ${PULL_DURATION}s"
 }
 
 # Stop existing services
@@ -243,7 +389,7 @@ stop_existing_services() {
     
     # Stop and remove existing containers (but keep volumes)
     ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
-        docker compose -f $COMPOSE_FILE down --remove-orphans || true"
+        docker compose -f $COMPOSE_FILE down --remove-orphans 2>/dev/null || true"
     
     log_success "Existing services stopped"
 }
@@ -270,7 +416,7 @@ run_migrations() {
     
     log_progress "Running database migrations..."
     
-    # Run migrations using docker compose run (automatically uses correct network)
+    # Run migrations using docker compose run
     ssh $REMOTE_HOST "cd $DEPLOY_DIR && \
         docker compose -f $COMPOSE_FILE run --rm \
         -e RAILS_ENV=production \
@@ -345,11 +491,11 @@ verify_deployment() {
 cleanup_old_images() {
     log_subheader "🧹 CLEANING UP OLD IMAGES"
     
-    log_progress "Removing unused Docker images..."
+    log_progress "Removing unused Docker images on server..."
     
     # Remove unused images (keep last 2 versions)
     ssh $REMOTE_HOST "docker image prune -f && \
-        docker images ${CHATWOOT_IMAGE} --format '{{.Repository}}:{{.Tag}}' | \
+        docker images ${DOCKER_USERNAME}/${IMAGE_NAME} --format '{{.Repository}}:{{.Tag}}' | \
         tail -n +3 | xargs -r docker rmi || true"
     
     log_success "Cleanup completed"
@@ -366,7 +512,7 @@ show_summary() {
     
     echo -e "${GREEN}✅ Deployment finished at: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
     echo -e "${GREEN}⏱️  Total duration: ${MINUTES}m ${SECONDS}s${NC}"
-    echo -e "${GREEN}📦 Image: ${CHATWOOT_IMAGE}:${TAG}${NC}"
+    echo -e "${GREEN}📦 Image: $FULL_IMAGE_NAME${NC}"
     echo -e "${GREEN}🧳 Server: ${REMOTE_HOST}${NC}"
     echo -e "${GREEN}🌐 Application URL: http://${REMOTE_HOST}:3080${NC}"
     echo -e "${GREEN}📋 Log file: ${LOG_FILE}${NC}"
@@ -431,6 +577,12 @@ show_summary() {
     echo "   ssh ${REMOTE_HOST} 'docker exec \$(docker ps -q -f name=chatwoot-rails) ls -lh /app/public/packs/js/sdk.js'"
     echo ""
 
+    echo -e "${CYAN}🔄 Rollback to previous image:${NC}"
+    echo "   # Update IMAGE_TAG in this script or docker-compose file"
+    echo "   ssh ${REMOTE_HOST} 'cd ${DEPLOY_DIR} && docker pull ${DOCKER_USERNAME}/${IMAGE_NAME}:PREVIOUS_TAG'"
+    echo "   ssh ${REMOTE_HOST} 'cd ${DEPLOY_DIR} && docker compose -f ${COMPOSE_FILE} up -d'"
+    echo ""
+
     echo -e "${WHITE}════════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}🚀 Happy coding! Your Chatwoot instance is live and ready! 🎉${NC}"
     echo -e "${WHITE}════════════════════════════════════════════════════════════════${NC}"
@@ -439,9 +591,13 @@ show_summary() {
 # Main deployment flow
 main() {
     check_required_files
-    sync_code_to_server
+    generate_image_tag
+    build_image_locally
+    push_image_to_registry
+    sync_compose_file
+    update_compose_image
     stop_existing_services
-    build_image_on_server
+    pull_image_on_server
     start_database_services
     run_migrations
     start_new_services

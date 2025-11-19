@@ -76,6 +76,10 @@ RUN pnpm i
 
 COPY . /app
 
+# Make entrypoint scripts executable
+RUN chmod +x docker/entrypoints/*.sh && \
+    find docker/entrypoints -type f -exec chmod +x {} \;
+
 # creating a log directory so that image wont fail when RAILS_LOG_TO_STDOUT is false
 # https://github.com/chatwoot/chatwoot/issues/701
 RUN mkdir -p /app/log
@@ -87,7 +91,15 @@ RUN if [ "$RAILS_ENV" = "production" ]; then \
   fi
 
 # Generate .git_sha file with current commit hash
-RUN git rev-parse HEAD > /app/.git_sha
+# If .git doesn't exist (e.g., during deployment sync), use existing .git_sha file
+# The deployment script generates .git_sha locally before syncing
+RUN if [ -d ".git" ]; then \
+      git rev-parse HEAD > /app/.git_sha; \
+    elif [ -f ".git_sha" ]; then \
+      echo "Using existing .git_sha file from deployment sync"; \
+    else \
+      echo "unknown" > /app/.git_sha; \
+    fi
 
 # Remove unnecessary files
 RUN rm -rf /gems/ruby/3.4.0/cache/*.gem \
@@ -146,6 +158,10 @@ COPY --from=pre-builder /app /app
 
 # Copy .git_sha file from pre-builder stage
 COPY --from=pre-builder /app/.git_sha /app/.git_sha
+
+# Ensure entrypoint scripts are executable (in case permissions weren't preserved)
+RUN chmod +x docker/entrypoints/*.sh 2>/dev/null || true && \
+    find docker/entrypoints -type f -exec chmod +x {} \; 2>/dev/null || true
 
 WORKDIR /app
 

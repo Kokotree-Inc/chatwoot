@@ -1,206 +1,558 @@
-# Chatwoot Production Deployment Guide
+# Chatwoot Deployment Guide
 
-This guide explains how to deploy Chatwoot to an Ubuntu production server using the `deploy-server-build.sh` script.
+Complete guide for deploying Chatwoot to production on Ubuntu server.
 
-## Prerequisites
+## 📋 Table of Contents
 
-1. **Server Setup:**
-   - Ubuntu server with Docker and Docker Compose installed
-   - SSH access configured (add server to `~/.ssh/config`)
-   - Sufficient disk space (at least 10GB free)
-   - At least 4GB RAM recommended
+1. [Quick Start](#quick-start)
+2. [Deployment Scripts](#deployment-scripts)
+3. [Pre-Deployment Checklist](#pre-deployment-checklist)
+4. [Deployment Process](#deployment-process)
+5. [Nginx Setup](#nginx-setup)
+6. [SSL Certificate Setup](#ssl-certificate-setup)
+7. [Post-Deployment](#post-deployment)
+8. [Troubleshooting](#troubleshooting)
+9. [Common Commands](#common-commands)
 
-2. **Local Machine:**
-   - SSH access to production server
-   - `rsync` installed
-   - Git repository cloned locally
+---
 
-3. **Server Requirements:**
-   - Docker 20.10+
-   - Docker Compose 2.0+
-   - PostgreSQL 16+ with pgvector extension (handled by Docker)
-   - Redis (handled by Docker)
+## 🚀 Quick Start
 
-## Configuration
-
-Before running the deployment script, configure the following variables in `deploy-server-build.sh`:
+### First Time Deployment
 
 ```bash
-REMOTE_HOST="kokotree-prod-server"  # Your SSH hostname from ~/.ssh/config
-DEPLOY_DIR="/var/www/apaya/chatwoot"       # Deployment directory on server
+# 1. Deploy Chatwoot
+./deploy.sh  # or ./deploy-server-build.sh
+
+# 2. Setup Nginx (manual)
+scp nginx-chatwoot.conf kokotree-prod-server:/tmp/
+ssh kokotree-prod-server
+sudo cp /tmp/nginx-chatwoot.conf /etc/nginx/sites-available/chatwoot
+sudo ln -s /etc/nginx/sites-available/chatwoot /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# 3. Setup SSL (manual)
+sudo certbot --nginx -d chat.apaya.com
+
+# 4. Update FRONTEND_URL
+nano /var/www/apaya/chatwoot/.env
+# Add: FRONTEND_URL=https://chat.apaya.com
+docker compose -f docker-compose.production.yaml restart rails sidekiq
 ```
 
-## Environment Variables
+---
 
-Ensure your `.env` file is properly configured on the server with:
+## 📦 Deployment Scripts
 
-- `POSTGRES_PASSWORD` - PostgreSQL password
-- `REDIS_PASSWORD` - Redis password
-- `SECRET_KEY_BASE` - Rails secret key base
-- `FRONTEND_URL` - Your frontend URL (e.g., `https://chatwoot.example.com`)
-- `RAILS_ENV=production`
-- `NODE_ENV=production`
-- Other Chatwoot-specific environment variables
+### Script 1: `deploy.sh` (Registry-Based - Recommended)
 
-**Important:** The `.env` file should already exist on the server. The deployment script excludes `.env` files from syncing for security.
+**What it does:**
+- Builds Docker image locally
+- Pushes to Docker Hub registry
+- Pulls image on server
+- Starts containers
 
-## Deployment Process
+**Configuration:**
+Add to `.env`:
+```bash
+DOCKER_USERNAME=raghavkokotree
+REMOTE_HOST=kokotree-prod-server
+IMAGE_NAME=chatwoot
+IMAGE_TAG=latest
+DEPLOY_DIR=/var/www/apaya/chatwoot
+PRODUCTION_FRONTEND_URL=https://chat.apaya.com  # Optional
+```
 
-The deployment script performs the following steps:
+**Usage:**
+```bash
+./deploy.sh
+```
 
-1. **File Checks** - Verifies required files exist
-2. **Code Sync** - Syncs code to server (excludes node_modules, .git, etc.)
-3. **Stop Services** - Stops existing Docker containers
-4. **Build Image** - Builds Docker image on server (includes asset precompilation and SDK build)
-5. **Run Migrations** - Runs database migrations
-6. **Start Services** - Starts all Docker services
-7. **Verify Deployment** - Checks service health and SDK file
-8. **Cleanup** - Removes old Docker images
+**Pros:**
+- ✅ Faster deployments (2-5 minutes)
+- ✅ No build on server
+- ✅ Easy rollback
+- ✅ Industry standard
 
-## Running the Deployment
+---
 
+### Script 2: `deploy-server-build.sh` (Build on Server)
+
+**What it does:**
+- Syncs source code to server (tar/gzip)
+- Builds Docker image on server
+- Runs database migrations
+- Starts containers
+
+**Configuration:**
+Edit script variables:
+```bash
+REMOTE_HOST="kokotree-prod-server"
+DEPLOY_DIR="/var/www/apaya/chatwoot"
+```
+
+**Usage:**
 ```bash
 ./deploy-server-build.sh
 ```
 
-The script will:
-- Create a log file in `./deploy/deploy_server_build_TIMESTAMP.log`
-- Show colored output with progress indicators
-- Handle errors gracefully and provide helpful error messages
+**Pros:**
+- ✅ No registry needed
+- ✅ Full control
+- ✅ Good for single server
 
-## What Gets Built
+**Cons:**
+- ❌ Slower (15-30 minutes)
+- ❌ Uses server resources
 
-During the Docker build process:
+---
 
-1. **Ruby Gems** - Installed via `bundle install`
-2. **Node Dependencies** - Installed via `pnpm install`
-3. **SDK Build** - Automatically built via `pnpm run build:sdk` (triggered by `rake assets:precompile`)
-4. **Asset Precompilation** - Rails assets compiled via `rake assets:precompile`
-5. **Production Optimization** - Removes development/test dependencies
+## ✅ Pre-Deployment Checklist
 
-## Services Deployed
+### Server Requirements
 
-The deployment includes:
+- [ ] Ubuntu server with sudo access
+- [ ] Docker and Docker Compose installed
+- [ ] SSH access configured (`~/.ssh/config`)
+- [ ] Domain DNS configured (`chat.apaya.com` → server IP)
+- [ ] Ports available (3080, 5432, 6379)
+- [ ] `.env` file ready (or will be synced by script)
 
-- **Rails** - Main web application (port 3080 externally, 3000 internally)
-- **Sidekiq** - Background job processor
-- **PostgreSQL** - Database with pgvector extension
-- **Redis** - Cache and job queue
+### Local Machine
 
-## Post-Deployment Verification
+- [ ] Git repository cloned
+- [ ] `.env` file exists (for `deploy.sh`)
+- [ ] Docker installed (for `deploy.sh`)
+- [ ] SSH access to server tested
 
-After deployment, verify:
+### Environment Variables
 
-1. **Services are running:**
-   ```bash
-   ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml ps'
-   ```
-
-2. **Application is accessible:**
-   ```bash
-   ssh kokotree-prod-server 'curl -I http://localhost:3080'
-   ```
-
-3. **SDK file exists:**
-   ```bash
-   ssh kokotree-prod-server 'docker exec $(docker ps -q -f name=chatwoot-rails) ls -lh /app/public/packs/js/sdk.js'
-   ```
-
-4. **Check logs for errors:**
-   ```bash
-   ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs --tail=50 rails'
-   ```
-
-## Common Operations
-
-### View Logs
+Required in `.env`:
 ```bash
-# Rails logs
+# Database
+POSTGRES_PASSWORD=your_password
+POSTGRES_HOST=postgres
+POSTGRES_USERNAME=postgres
+POSTGRES_DATABASE=chatwoot
+
+# Redis
+REDIS_URL=redis://redis:6379
+REDIS_PASSWORD=your_redis_password
+
+# Rails
+SECRET_KEY_BASE=your_secret_key
+RAILS_ENV=production
+NODE_ENV=production
+
+# Frontend (set after SSL)
+FRONTEND_URL=https://chat.apaya.com
+```
+
+---
+
+## 🔄 Deployment Process
+
+### Using `deploy.sh` (Registry-Based)
+
+1. **Build and Push:**
+   ```bash
+   ./deploy.sh
+   ```
+   - Builds Docker image locally
+   - Pushes to Docker Hub
+   - Syncs `.env` to server (with production values)
+   - Pulls image on server
+   - Starts containers
+
+2. **Verify:**
+   ```bash
+   ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose ps'
+   ```
+
+### Using `deploy-server-build.sh` (Build on Server)
+
+1. **Deploy:**
+   ```bash
+   ./deploy-server-build.sh
+   ```
+   - Creates tar.gz archive
+   - Transfers to server
+   - Extracts on server
+   - Builds Docker image
+   - Runs migrations
+   - Starts containers
+
+2. **Verify:**
+   ```bash
+   ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose ps'
+   ```
+
+---
+
+## 🌐 Nginx Setup
+
+### Step 1: Copy Config to Server
+
+```bash
+# From local machine
+scp nginx-chatwoot.conf kokotree-prod-server:/tmp/nginx-chatwoot.conf
+```
+
+### Step 2: Install Config on Server
+
+```bash
+# SSH into server
+ssh kokotree-prod-server
+
+# Copy to nginx sites-available
+sudo cp /tmp/nginx-chatwoot.conf /etc/nginx/sites-available/chatwoot
+
+# Edit if needed (domain is already set to chat.apaya.com)
+sudo nano /etc/nginx/sites-available/chatwoot
+```
+
+### Step 3: Enable Site
+
+```bash
+# Create symlink
+sudo ln -s /etc/nginx/sites-available/chatwoot /etc/nginx/sites-enabled/
+
+# Test configuration
+sudo nginx -t
+
+# Expected: "nginx: configuration file ... test is successful"
+```
+
+### Step 4: Reload Nginx
+
+```bash
+# Reload nginx
+sudo systemctl reload nginx
+
+# Check status
+sudo systemctl status nginx
+
+# Test HTTP (before SSL)
+curl -I http://chat.apaya.com
+```
+
+---
+
+## 🔒 SSL Certificate Setup
+
+### Prerequisites
+
+- ✅ DNS configured (`chat.apaya.com` → server IP)
+- ✅ Nginx configured and running
+- ✅ Port 80 accessible from internet
+
+### Step 1: Verify DNS
+
+```bash
+# From local machine
+nslookup chat.apaya.com
+# Should return your server IP
+```
+
+### Step 2: Install Certbot
+
+```bash
+# On server
+sudo apt update
+sudo apt install -y certbot python3-certbot-nginx
+```
+
+### Step 3: Obtain Certificate
+
+```bash
+# Run certbot
+sudo certbot --nginx -d chat.apaya.com
+
+# Follow prompts:
+# - Enter email address
+# - Agree to terms
+# - Redirect HTTP to HTTPS? (Yes - recommended)
+```
+
+Certbot will automatically:
+- ✅ Obtain SSL certificate
+- ✅ Update nginx config
+- ✅ Set up auto-renewal
+- ✅ Reload nginx
+
+### Step 4: Verify SSL
+
+```bash
+# Test HTTPS
+curl -I https://chat.apaya.com
+
+# Check certificate
+sudo certbot certificates
+
+# Test auto-renewal
+sudo certbot renew --dry-run
+```
+
+---
+
+## 🎯 Post-Deployment
+
+### Step 1: Update FRONTEND_URL
+
+```bash
+# SSH into server
+ssh kokotree-prod-server
+
+# Edit .env file
+nano /var/www/apaya/chatwoot/.env
+
+# Add/Update:
+FRONTEND_URL=https://chat.apaya.com
+```
+
+### Step 2: Restart Services
+
+```bash
+cd /var/www/apaya/chatwoot
+docker compose -f docker-compose.production.yaml restart rails sidekiq
+```
+
+### Step 3: Verify Everything
+
+```bash
+# Test HTTPS
+curl -I https://chat.apaya.com
+
+# Test SDK
+curl https://chat.apaya.com/packs/js/sdk.js | head -20
+
+# Access dashboard
+# Open: https://chat.apaya.com
+```
+
+---
+
+## 🆘 Troubleshooting
+
+### 502 Bad Gateway
+
+**Cause:** Chatwoot container not running or wrong port
+
+**Fix:**
+```bash
+# Check containers
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose ps'
+
+# Check logs
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose logs rails'
+
+# Verify port 3080
+ssh kokotree-prod-server 'netstat -tlnp | grep :3080'
+```
+
+### SSL Certificate Fails
+
+**Cause:** DNS not configured or port 80 blocked
+
+**Fix:**
+```bash
+# Verify DNS
+nslookup chat.apaya.com
+
+# Check firewall
+sudo ufw status
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+
+# Check nginx is running
+sudo systemctl status nginx
+```
+
+### Widget SDK 404
+
+**Cause:** SDK not built or wrong path
+
+**Fix:**
+```bash
+# Check SDK file in container
+ssh kokotree-prod-server 'docker exec $(docker ps -q -f name=chatwoot-rails) ls -lh /app/public/packs/js/sdk.js'
+
+# Rebuild if missing (deploy again)
+./deploy.sh
+```
+
+### Nginx Won't Start
+
+**Fix:**
+```bash
+# Test config
+sudo nginx -t
+
+# Check logs
+sudo tail -f /var/log/nginx/error.log
+
+# Check syntax
+sudo nginx -T | grep -A 10 "server_name"
+```
+
+### Port Conflicts
+
+**Check existing ports:**
+```bash
+# On server
+docker ps
+netstat -tlnp | grep -E ':3080|:5432|:6379'
+```
+
+**Chatwoot uses:**
+- Port 3080: Rails (bound to localhost)
+- Port 5432: PostgreSQL (internal)
+- Port 6379: Redis (internal)
+
+---
+
+## 🔧 Common Commands
+
+### Deployment
+
+```bash
+# Deploy (registry-based)
+./deploy.sh
+
+# Deploy (build on server)
+./deploy-server-build.sh
+
+# View deployment logs
+ls -la deploy/
+tail -f deploy/deploy_*.log
+```
+
+### Docker Management
+
+```bash
+# Check containers
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml ps'
+
+# View logs
 ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs -f rails'
 
-# Sidekiq logs
-ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs -f sidekiq'
-
-# All logs
-ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml logs -f'
-```
-
-### Restart Services
-```bash
-# Restart all
+# Restart services
 ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml restart'
 
-# Restart specific service
-ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml restart rails'
+# Stop services
+ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml down'
 ```
 
-### Run Database Migrations
+### Nginx Management
+
 ```bash
-ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker run --rm --env-file .env --network chatwoot_default -e RAILS_ENV=production chatwoot/chatwoot:latest bundle exec rails db:chatwoot_prepare'
+# Test config
+sudo nginx -t
+
+# Reload nginx
+sudo systemctl reload nginx
+
+# View logs
+sudo tail -f /var/log/nginx/chatwoot_error_443.log
+sudo tail -f /var/log/nginx/chatwoot_access_443.log
+
+# Check status
+sudo systemctl status nginx
 ```
 
-### Access Rails Console
+### SSL Management
+
 ```bash
-ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && docker compose -f docker-compose.production.yaml exec rails bundle exec rails console'
+# View certificates
+sudo certbot certificates
+
+# Renew certificate
+sudo certbot renew
+
+# Test renewal
+sudo certbot renew --dry-run
 ```
 
-## Troubleshooting
+### Clean Server (Fresh Start)
 
-### Build Fails
-- Check server has enough disk space: `df -h`
-- Check Docker has enough space: `docker system df`
-- Review build logs in the log file
+```bash
+# Stop containers
+cd /var/www/apaya/chatwoot
+docker compose -f docker-compose.production.yaml down
 
-### Services Won't Start
-- Check `.env` file exists and is properly configured
-- Verify database connection settings
-- Check Docker logs: `docker compose logs`
+# Remove Chatwoot containers/images
+docker ps -a | grep chatwoot
+docker stop $(docker ps -aq --filter "name=chatwoot") 2>/dev/null || true
+docker rm $(docker ps -aq --filter "name=chatwoot") 2>/dev/null || true
+docker images | grep chatwoot
+docker rmi $(docker images -q chatwoot*) 2>/dev/null || true
 
-### SDK File Missing
-- The SDK is built during Docker image build via `rake assets:precompile`
-- Verify build completed successfully
-- Check `/app/public/packs/js/sdk.js` exists in container
+# Remove volumes (⚠️ deletes database!)
+docker volume ls | grep chatwoot
+docker volume rm $(docker volume ls -q | grep chatwoot) 2>/dev/null || true
 
-### Database Connection Issues
-- Verify PostgreSQL container is running
-- Check `POSTGRES_PASSWORD` in `.env` matches
-- Verify network connectivity between containers
+# Clean directory (keep .env)
+cd /var/www/apaya
+mv chatwoot/.env /tmp/chatwoot.env.backup 2>/dev/null || true
+rm -rf chatwoot/*
+mkdir -p chatwoot
+mv /tmp/chatwoot.env.backup chatwoot/.env 2>/dev/null || true
+```
 
-## Rollback
+---
 
-To rollback to a previous version:
+## 📊 Port Information
 
-1. Tag the previous working image before deploying
-2. Stop current services
-3. Update `docker-compose.production.yaml` to use previous tag
-4. Start services
+| Service | Port | Binding | Status |
+|---------|------|---------|--------|
+| Chatwoot Rails | 3080 | 127.0.0.1:3080 | ✅ Localhost only |
+| PostgreSQL | 5432 | 127.0.0.1:5432 | ✅ Internal |
+| Redis | 6379 | 127.0.0.1:6379 | ✅ Internal |
+| Nginx HTTP | 80 | 0.0.0.0:80 | ✅ Public |
+| Nginx HTTPS | 443 | 0.0.0.0:443 | ✅ Public |
 
-## Security Notes
+**No conflicts** with existing Apaya services (3015, 8282, 8888, 8889) ✅
 
-1. **Never commit `.env` files** - They contain sensitive credentials
-2. **Use strong passwords** - Especially for PostgreSQL and Redis
-3. **Configure firewall** - Only expose necessary ports
-4. **Use HTTPS** - Set up reverse proxy (nginx/Apache) with SSL
-5. **Regular updates** - Keep Docker and system packages updated
+---
 
-## Performance Optimization
+## 📁 File Locations
 
-1. **Resource Limits** - Set appropriate CPU/memory limits in docker-compose
-2. **Database Optimization** - Tune PostgreSQL settings for your workload
-3. **Redis Configuration** - Configure Redis persistence if needed
-4. **Asset CDN** - Use `ASSET_CDN_HOST` for static assets
+### On Local Machine
+- `deploy.sh` - Registry-based deployment script
+- `deploy-server-build.sh` - Build-on-server deployment script
+- `nginx-chatwoot.conf` - Nginx configuration
+- `docs/DEPLOYMENT.md` - This file
 
-## Monitoring
+### On Server
+- `/var/www/apaya/chatwoot/` - Chatwoot deployment directory
+- `/var/www/apaya/chatwoot/.env` - Environment variables
+- `/etc/nginx/sites-available/chatwoot` - Nginx config
+- `/etc/nginx/sites-enabled/chatwoot` - Enabled nginx config
+- `/var/log/nginx/chatwoot_*.log` - Nginx logs
+- `/etc/letsencrypt/live/chat.apaya.com/` - SSL certificates
 
-Consider setting up:
-- Application monitoring (e.g., Sentry)
-- Server monitoring (e.g., Prometheus, Grafana)
-- Log aggregation (e.g., ELK stack)
-- Uptime monitoring
+---
 
-## Support
+## 🎯 Summary
 
-For issues specific to Chatwoot, refer to:
-- [Chatwoot Documentation](https://www.chatwoot.com/docs)
-- [Chatwoot GitHub Issues](https://github.com/chatwoot/chatwoot/issues)
+**Automated (deployment scripts):**
+- ✅ Code sync / Image build
+- ✅ Docker build / Image pull
+- ✅ Database setup
+- ✅ Service startup
+- ✅ `.env` sync (with production values)
+
+**Manual (you need to do):**
+- ⚠️ Nginx configuration
+- ⚠️ SSL certificate setup
+- ⚠️ Update FRONTEND_URL (if not auto-set)
+- ⚠️ Restart services after .env update
+
+**After all steps:** Chatwoot is fully deployed at `https://chat.apaya.com` 🎉
+
+---
+
+**Last Updated:** 2024  
+**Domain:** `chat.apaya.com`  
+**Deployment Directory:** `/var/www/apaya/chatwoot`
 
