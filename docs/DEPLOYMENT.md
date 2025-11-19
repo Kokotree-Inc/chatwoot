@@ -544,6 +544,58 @@ ssh kokotree-prod-server 'uname -m'
 ./deploy.sh
 ```
 
+### Email Not Sending / SMTP Issues
+
+**Cause:** SMTP configuration incorrect, credentials wrong, or email not verified in AWS SES
+
+**Symptoms:**
+- Emails not being sent
+- Password reset emails not arriving
+- SMTP authentication errors in logs
+
+**Fix:**
+```bash
+# 1. Check if SMTP variables are loaded
+ssh kokotree-prod-server "cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec rails env | grep SMTP"
+
+# Should show:
+# SMTP_ADDRESS=email-smtp.us-east-1.amazonaws.com
+# SMTP_PORT=587
+# SMTP_USERNAME=AKIA...
+# SMTP_AUTHENTICATION=plain
+# SMTP_TLS=false
+
+# 2. Check Rails logs for email errors
+ssh kokotree-prod-server "cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml logs rails | grep -i 'mail\|smtp\|email' | tail -20"
+
+# 3. Verify email is verified in AWS SES
+# Go to: AWS Console → SES → Verified identities
+# Make sure info@apaya.com (or apaya.com domain) is verified
+
+# 4. Test SMTP connection from Rails console
+ssh kokotree-prod-server "cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec rails bundle exec rails runner \"
+require 'net/smtp'
+begin
+  smtp = Net::SMTP.new('email-smtp.us-east-1.amazonaws.com', 587)
+  smtp.enable_starttls
+  smtp.start('apaya.com', ENV['SMTP_USERNAME'], ENV['SMTP_PASSWORD'], :plain) do
+    puts '✅ SMTP connection successful!'
+  end
+rescue => e
+  puts \"❌ SMTP connection failed: #{e.message}\"
+end
+\""
+
+# 5. Sync updated .env file if needed
+scp .env kokotree-prod-server:/var/www/apaya/chatwoot/.env
+ssh kokotree-prod-server "chmod 600 /var/www/apaya/chatwoot/.env && \
+  cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml restart rails sidekiq"
+```
+
 ---
 
 ## 🔧 Common Commands
@@ -635,6 +687,23 @@ ssh kokotree-prod-server 'curl -I http://localhost:3080'
 ssh kokotree-prod-server 'cd /var/www/apaya/chatwoot && \
   docker compose -f docker-compose.production.yaml exec postgres \
   pg_isready -U postgres'
+
+# Check if SMTP variables are loaded
+ssh kokotree-prod-server "cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec rails env | grep SMTP"
+
+# Test SMTP connection
+ssh kokotree-prod-server "cd /var/www/apaya/chatwoot && \
+  docker compose -f docker-compose.production.yaml exec rails bundle exec rails runner \"
+require 'net/smtp'
+begin
+  smtp = Net::SMTP.new('email-smtp.us-east-1.amazonaws.com', 587)
+  smtp.enable_starttls
+  smtp.start('apaya.com', ENV['SMTP_USERNAME'], ENV['SMTP_PASSWORD'], :plain) { puts '✅ SMTP OK' }
+rescue => e
+  puts \"❌ SMTP Error: #{e.message}\"
+end
+\""
 ```
 
 ### Nginx Management
