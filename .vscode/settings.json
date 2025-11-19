@@ -2,5 +2,17 @@
     "cSpell.words": [
         "chatwoot",
         "dompurify"
-    ]
+    ],
+    "files.associations": {
+        "*.vue": "vue"
+    },
+    "vetur.validation.template": false,
+    "vetur.validation.script": false,
+    "vetur.validation.style": false,
+    "[vue]": {
+        "editor.defaultFormatter": "Vue.volar"
+    },
+    "volar.autoCompleteRefs": true,
+    "volar.codeLens.pugTools": false,
+    "volar.codeLens.scriptSetupTools": true
 }
