@@ -59,4 +59,66 @@ debug_worker:
 docker: 
 	docker build -t $(APP_NAME) -f ./docker/Dockerfile .
 
-.PHONY: setup db_create db_migrate db_seed db_reset db console server burn docker run force_run force_run_tunnel debug debug_worker
+docker_up:
+	docker compose up -d
+
+docker_down:
+	docker compose down
+
+docker_logs:
+	docker compose logs -f
+
+docker_restart:
+	docker compose restart
+
+docker_rebuild:
+	docker compose build
+
+docker_console:
+	docker compose exec rails bundle exec rails console
+
+docker_db_prepare:
+	docker compose exec rails bundle exec rails db:chatwoot_prepare
+
+docker_db_migrate:
+	docker compose exec rails bundle exec rails db:migrate
+
+docker_db_reset:
+	docker compose exec rails bundle exec rails db:reset
+
+docker_db_seed:
+	docker compose exec rails bundle exec rails db:seed
+
+docker_build_sdk:
+	docker compose exec vite pnpm run build:sdk
+
+docker_ps:
+	docker compose ps
+
+docker_setup:
+	@echo "🔨 Building base image (this may take 5-10 minutes)..."
+	docker compose build base
+	@echo "🔨 Building all services..."
+	docker compose build
+	@echo "🗄️  Starting PostgreSQL and Redis..."
+	docker compose up -d postgres redis
+	@echo "⏳ Waiting for database to be ready (45 seconds)..."
+	sleep 45
+	@echo "🚀 Starting Vite service (to install node_modules)..."
+	docker compose up -d vite
+	@echo "⏳ Waiting for node_modules to be installed (30 seconds)..."
+	sleep 30
+	@echo "🚀 Starting Rails service (needed for database setup)..."
+	docker compose up -d rails
+	@echo "⏳ Waiting for Rails to be ready (15 seconds)..."
+	sleep 15
+	@echo "🗄️  Setting up database (this may take a few minutes)..."
+	docker compose exec rails bundle exec rails db:chatwoot_prepare
+	@echo "📦 Building SDK..."
+	docker compose exec vite pnpm run build:sdk
+	@echo "🚀 Starting all remaining services..."
+	docker compose up -d
+	@echo "✅ Setup complete! Access Chatwoot at http://localhost:3100"
+	@echo "📧 Login: john@acme.inc / Password1!"
+
+.PHONY: setup db_create db_migrate db_seed db_reset db console server burn docker docker_up docker_down docker_logs docker_restart docker_rebuild docker_console docker_db_prepare docker_db_migrate docker_db_reset docker_db_seed docker_build_sdk docker_ps docker_setup run force_run force_run_tunnel debug debug_worker
